@@ -4,7 +4,7 @@ import ReactFlow, { Background, Controls, MiniMap, ReactFlowProvider, useEdgesSt
 import { IconSparkles } from '@tabler/icons-react'
 
 import { tokens } from './core/theme'
-import type { AgentFlowInstance, AgentflowProps, FlowData, FlowEdge, FlowNode } from './core/types'
+import type { AgentFlowInstance, AgentflowProps, FlowData, FlowDataCallback, FlowEdge, FlowNode } from './core/types'
 import {
     AgentflowHeader,
     ConnectionLine,
@@ -42,16 +42,16 @@ function AgentflowCanvas({
 }: {
     initialFlow?: FlowData
     readOnly?: boolean
-    onFlowChange?: (flow: FlowData) => void
-    onSave?: (flow: FlowData) => void
-    onFlowGenerated?: (flow: FlowData) => void
+    onFlowChange?: FlowDataCallback
+    onSave?: FlowDataCallback
+    onFlowGenerated?: FlowDataCallback
     showDefaultHeader?: boolean
     showDefaultPalette?: boolean
     enableGenerator?: boolean
     renderHeader?: AgentflowProps['renderHeader']
     renderNodePalette?: AgentflowProps['renderNodePalette']
 }) {
-    const { state, setNodes, setEdges, setDirty, setReactFlowInstance, closeEditDialog } = useAgentflowContext()
+    const { state, setNodes, setEdges, setDirty, setReactFlowInstance, closeEditDialog, registerLocalStateSetters } = useAgentflowContext()
     const { isDarkMode } = useConfigContext()
     const agentflow = useAgentflow()
     const reactFlowWrapper = useRef<HTMLDivElement>(null)
@@ -75,73 +75,22 @@ function AgentflowCanvas({
     // Load available nodes
     const { availableNodes } = useFlowNodes()
 
-    // TODO: Refactor bidirectional state sync architecture
-    // Current implementation uses refs and setTimeout to prevent circular updates between
-    // ReactFlow's local state (useNodesState/useEdgesState) and AgentflowContext state.
-    // This approach is brittle and prone to race conditions.
-    //
-    // Problem: We have TWO sources of truth:
-    //   1. ReactFlow local state (nodes/edges) - updated by drag/drop, user interactions
-    //   2. AgentflowContext state - updated by edit dialog, delete, duplicate operations
-    //
-    // Current sync flow:
-    //   - Local ReactFlow → Context (for drag/drop) ✓
-    //   - Context → Local ReactFlow (for edit dialog updates) ⚠️ Brittle with refs/setTimeout
-    //
-    // Better solution (for future refactor):
-    //   Option A: Make context operations (updateNodeData, deleteNode, etc.) also call
-    //             setLocalNodes/setLocalEdges directly, then remove reverse sync entirely.
-    //   Option B: Use deep equality checks (e.g., lodash.isEqual) instead of refs/setTimeout.
-    //   Option C: Consolidate to single source of truth (context only, ReactFlow reads from it).
-    //
-    // See: https://github.com/FlowiseAI/Flowise/pull/XXX for discussion
-    //
-    // Use refs to prevent circular sync updates
-    const syncingToContext = useRef(false)
-    const syncingFromContext = useRef(false)
+    // Register local state setters with context on mount
+    useEffect(() => {
+        registerLocalStateSetters(setLocalNodes, setLocalEdges)
+    }, [registerLocalStateSetters, setLocalNodes, setLocalEdges])
 
     // Sync local ReactFlow state to context (when user interacts with canvas)
     useEffect(() => {
-        if (syncingFromContext.current) return
-        syncingToContext.current = true
         setNodes(nodes as FlowNode[])
-        // Use setTimeout to reset the flag after the sync completes
-        setTimeout(() => {
-            syncingToContext.current = false
-        }, 0)
     }, [nodes, setNodes])
 
     useEffect(() => {
-        if (syncingFromContext.current) return
-        syncingToContext.current = true
         setEdges(edges as FlowEdge[])
-        setTimeout(() => {
-            syncingToContext.current = false
-        }, 0)
     }, [edges, setEdges])
 
-    // Sync context state back to local ReactFlow (when updated via edit dialog, etc.)
-    useEffect(() => {
-        if (syncingToContext.current) return
-        syncingFromContext.current = true
-        setLocalNodes(state.nodes)
-        setTimeout(() => {
-            syncingFromContext.current = false
-        }, 0)
-    }, [state.nodes, setLocalNodes])
-
-    useEffect(() => {
-        if (syncingToContext.current) return
-        syncingFromContext.current = true
-        setLocalEdges(state.edges)
-        setTimeout(() => {
-            syncingFromContext.current = false
-        }, 0)
-    }, [state.edges, setLocalEdges])
-    // END TODO: Bidirectional state sync
-
     // Flow handlers
-    const { handleConnect, handleNodesChange, handleEdgesChange, handleAddNode } = useFlowHandlers({
+    const { handleConnect, handleNodesChange, handleNodeDragStop, handleEdgesChange, handleAddNode } = useFlowHandlers({
         nodes: nodes as FlowNode[],
         edges: edges as FlowEdge[],
         setLocalNodes: setLocalNodes as React.Dispatch<React.SetStateAction<FlowNode[]>>,
@@ -181,8 +130,21 @@ function AgentflowCanvas({
     const handleSave = useCallback(() => {
         if (onSave) {
             onSave(agentflow.getFlow())
+            setDirty(false)
         }
-    }, [onSave, agentflow])
+    }, [onSave, agentflow, setDirty])
+
+    // Keyboard shortcut: Cmd+S / Ctrl+S to save
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+                e.preventDefault()
+                handleSave()
+            }
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+    }, [handleSave])
 
     // Header props
     const headerProps = createHeaderProps(
@@ -246,6 +208,7 @@ function AgentflowCanvas({
                         onNodesChange={handleNodesChange}
                         onEdgesChange={handleEdgesChange}
                         onConnect={handleConnect}
+                        onNodeDragStop={handleNodeDragStop}
                         onInit={setReactFlowInstance}
                         nodeTypes={nodeTypes}
                         edgeTypes={edgeTypes}
@@ -351,9 +314,9 @@ const AgentflowCanvasWithRef = forwardRef<
     {
         initialFlow?: FlowData
         readOnly?: boolean
-        onFlowChange?: (flow: FlowData) => void
-        onSave?: (flow: FlowData) => void
-        onFlowGenerated?: (flow: FlowData) => void
+        onFlowChange?: FlowDataCallback
+        onSave?: FlowDataCallback
+        onFlowGenerated?: FlowDataCallback
         showDefaultHeader?: boolean
         showDefaultPalette?: boolean
         enableGenerator?: boolean
